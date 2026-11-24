@@ -1,0 +1,24 @@
+---
+# Revert a host that failed its post-patch health check.
+- name: Roll back the LVM snapshot if one was taken
+  ansible.builtin.command: lvconvert --merge /dev/{{ root_vg | default('rootvg') }}/cadence_pre_patch
+  failed_when: false
+  register: lvm_merge
+
+- name: Pin the previous known-good kernel as default
+  ansible.builtin.command: "grubby --set-default {{ default_kernel.stdout }}"
+  when: default_kernel is defined
+
+- name: Reboot into the rolled-back state
+  ansible.builtin.reboot:
+    reboot_timeout: "{{ reboot_timeout }}"
+
+- name: Verify the rolled-back host is healthy
+  ansible.builtin.uri:
+    url: "{{ health_url }}"
+    validate_certs: false
+    status_code: 200
+  retries: 6
+  delay: 10
+  register: rb_health
+  until: rb_health.status == 200

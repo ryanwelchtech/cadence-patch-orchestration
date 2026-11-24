@@ -1,0 +1,91 @@
+---
+# CADENCE patch orchestration — the executor for the plan in core/.
+#
+#   ansible-playbook patch.yml --limit canary          # prove the canary first
+#   ansible-playbook patch.yml --limit staging
+#   ansible-playbook patch.yml --limit prod             # only after staging is green
+#
+# Health gating:  `serial` bounds blast radius per batch and `max_fail_percentage`
+# halts the whole run the moment a batch exceeds the gate. `block/rescue` reverts
+# any host that fails its post-patch health check back to its pre-patch snapshot.
+
+- name: Pre-flight — enforce maintenance window and capture baseline
+  hosts: all
+  gather_facts: true
+  any_errors_fatal: true
+  tasks:
+    - name: Refuse to patch prod outside the maintenance window
+      ansible.builtin.assert:
+        that: >
+          ('prod' not in group_names) or
+          (now(fmt='%H') | int >= maint_window_start and now(fmt='%H') | int < maint_window_end)
+        fail_msg: "Outside maintenance window {{ maint_window_start }}:00–{{ maint_window_end }}:00 for {{ inventory_hostname }}"
+      run_once: false
+
+    - name: OpenSCAP STIG baseline (before)
+      ansible.builtin.include_role:
+        name: openscap
+      vars:
+        scap_phase: before
+
+- name: Patch batch with blast-radius limit and automatic rollback
+  hosts: all
+  become: true
+  serial:
+    - 1          # first host of any limit acts as an in-batch canary
+    - "34%"      # then a third of the batch at a time (blast radius)
+    - "34%"
+  max_fail_percentage: 25    # health gate: >25% of a batch failing halts the run
+  tasks:
+    - name: Snapshot boot entry and installed package set (rollback point)
+      ansible.builtin.include_role:
+        name: patch
+        tasks_from: snapshot
+
+    - name: Apply security updates
+      block:
+        - name: dnf security upgrade
+          ansible.builtin.dnf:
+            name: "*"
+            state: latest
+            security: true
+            bugfix: true
+          register: patch_result
+
+        - name: Reboot if the kernel or core libraries changed
+          ansible.builtin.reboot:
+            reboot_timeout: "{{ reboot_timeout }}"
+          when: patch_result is changed and (patch_result.results | join(' ') is search('kernel|glibc'))
+
+        - name: Post-patch health check (readiness)
+          ansible.builtin.uri:
+            url: "{{ health_url }}"
+            validate_certs: false
+            status_code: 200
+          retries: 6
+          delay: 10
+          register: health
+          until: health.status == 200
+
+      rescue:
+        - name: ROLLBACK — restore the pre-patch snapshot
+          ansible.builtin.include_role:
+            name: patch
+            tasks_from: rollback
+        - name: Mark host failed so max_fail_percentage can trip the gate
+          ansible.builtin.fail:
+            msg: "{{ inventory_hostname }} failed post-patch health; rolled back"
+
+- name: Post — OpenSCAP STIG rescan and POA&M evidence
+  hosts: all
+  tasks:
+    - name: OpenSCAP STIG rescan (after)
+      ansible.builtin.include_role:
+        name: openscap
+      vars:
+        scap_phase: after
+    - name: Emit per-host patch record for the change ticket
+      ansible.builtin.copy:
+        dest: "/var/log/cadence/{{ inventory_hostname }}-{{ now(fmt='%Y%m%d') }}.json"
+        content: "{{ {'host': inventory_hostname, 'patched': patch_result.changed | default(false), 'stig_before': scap_before | default('n/a'), 'stig_after': scap_after | default('n/a')} | to_nice_json }}"
+      delegate_to: localhost

@@ -1,0 +1,17 @@
+---
+# Capture a rollback point before touching the host.
+- name: Record currently installed packages
+  ansible.builtin.shell: "rpm -qa | sort > /var/tmp/cadence-pkgs-before.txt"
+  changed_when: false
+
+- name: Record the current default boot kernel
+  ansible.builtin.command: grubby --default-kernel
+  register: default_kernel
+  changed_when: false
+
+- name: Create an LVM snapshot of root (if LVM-backed)
+  ansible.builtin.command: >
+    lvcreate --size 2G --snapshot --name cadence_pre_patch /dev/{{ root_vg | default('rootvg') }}/{{ root_lv | default('root') }}
+  register: lvm_snap
+  failed_when: false
+  changed_when: lvm_snap.rc == 0
