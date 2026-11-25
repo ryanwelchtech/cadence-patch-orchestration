@@ -18,7 +18,7 @@ fleet, done as safe, auditable automation instead of a risky all-at-once push.
 
 ![CADENCE demo](docs/demo.gif)
 
-**Live demo:** https://cadence-patch-orchestration.vercel.app · run each scenario
+**Live demo:** https://cadence-alpha-ruddy.vercel.app · run each scenario
 and watch the waves, the gate, and the rollback.
 
 ---
